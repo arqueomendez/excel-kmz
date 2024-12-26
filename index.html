@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Conversor Excel a KML</title>
+  <script src="https://cdn.jsdelivr.net/npm/ol@v10.3.1/dist/ol.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@v10.3.1/ol.css">
+
+  <style>
+    #map {
+      width: 100%;
+      height: 400px;
+    }
+    .map-container {
+      margin: 20px 0;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .controls {
+      padding: 20px;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 4px;
+      margin-bottom: 20px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    select {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #d1d5db;
+      border-radius: 4px;
+      background-color: white;
+    }
+    label {
+      display: block;
+      margin-bottom: 8px;
+      font-weight: 500;
+      font-size: 14px;
+    }
+    button {
+      background-color: #2563eb;
+      color: white;
+      padding: 8px 16px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      width: 100%;
+    }
+    button:hover {
+      background-color: #1d4ed8;
+    }
+    button:disabled {
+      background-color: #93c5fd;
+      cursor: not-allowed;
+    }
+    .file-input {
+      margin-bottom: 16px;
+    }
+    .error {
+      color: #dc2626;
+      background-color: #fee2e2;
+      padding: 12px;
+      border-radius: 4px;
+      margin-bottom: 16px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div style="max-width: 1200px; margin: 0 auto; padding: 20px;">
+    <h1>Conversor Excel a KML</h1>
+
+    <div class="controls">
+      <div class="file-input">
+        <label for="excelFile">Archivo Excel:</label>
+        <input type="file" id="excelFile" accept=".xlsx,.xls">
+      </div>
+
+      <div id="error" class="error"></div>
+
+      <div class="grid">
+        <div>
+          <label for="xColumn">UTM X / Este:</label>
+          <select id="xColumn" disabled>
+            <option value="">Seleccionar columna</option>
+          </select>
+        </div>
+
+        <div>
+          <label for="yColumn">UTM Y / Norte:</label>
+          <select id="yColumn" disabled>
+            <option value="">Seleccionar columna</option>
+          </select>
+        </div>
+
+        <div>
+          <label for="nameColumn">Nombre:</label>
+          <select id="nameColumn" disabled>
+            <option value="">Seleccionar columna</option>
+          </select>
+        </div>
+
+        <div>
+          <label for="datum">DATUM:</label>
+          <select id="datum">
+            <option value="EPSG:32719">WGS 84 / UTM 19S (EPSG:32719)</option>
+            <option value="EPSG:32718">WGS 84 / UTM 18S (EPSG:32718)</option>
+            <option value="EPSG:32717">WGS 84 / UTM 17S (EPSG:32717)</option>
+            <option value="EPSG:4326">WGS 84 (EPSG:4326)</option>
+            <option value="EPSG:5361">SIRGAS-Chile (EPSG:5361)</option>
+            <option value="EPSG:24879">PSAD56 / UTM 19S (EPSG:24879)</option>
+          </select>
+        </div>
+      </div>
+
+      <button id="exportButton" disabled>Exportar a KML</button>
+    </div>
+
+    <div class="map-container">
+      <div id="map"></div>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script>
+    // Inicializar mapa
+    const map = new ol.Map({
+      target: 'map',
+      layers: [
+        new ol.layer.Tile({
+          source: new ol.source.OSM()
+        })
+      ],
+      view: new ol.View({
+        center: ol.proj.fromLonLat([-70.6483, -33.4569]),
+        zoom: 8
+      })
+    });
+
+    // Capa de vectores para los puntos
+    const vectorSource = new ol.source.Vector();
+    const vectorLayer = new ol.layer.Vector({
+      source: vectorSource,
+      style: new ol.style.Style({
+        image: new ol.style.Circle({
+          radius: 6,
+          fill: new ol.style.Fill({
+            color: '#2563eb'
+          }),
+          stroke: new ol.style.Stroke({
+            color: '#ffffff',
+            width: 2
+          })
+        })
+      })
+    });
+    map.addLayer(vectorLayer);
+
+    // Variables globales
+    let excelData = null;
+    let columns = [];
+
+    // Elementos del DOM
+    const fileInput = document.getElementById('excelFile');
+    const xSelect = document.getElementById('xColumn');
+    const ySelect = document.getElementById('yColumn');
+    const nameSelect = document.getElementById('nameColumn');
+    const datumSelect = document.getElementById('datum');
+    const exportButton = document.getElementById('exportButton');
+    const errorDiv = document.getElementById('error');
+
+    // Manejador de cambio de archivo
+    fileInput.addEventListener('change', function(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        try {
+          const data = new Uint8Array(e.target.result);
+          const workbook = XLSX.read(data, {type: 'array'});
+
+          const sheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[sheetName];
+
+          const jsonData = XLSX.utils.sheet_to_json(worksheet, {header: 1});
+
+          if (jsonData.length < 2) {
+            showError('El archivo Excel está vacío o no tiene datos suficientes');
+            return;
+          }
+
+          const headerRow = jsonData[0];
+          columns = headerRow.map(col => col?.toString().trim()).filter(Boolean);
+          excelData = jsonData.slice(1).map(row => {
+            const rowData = {};
+            row.forEach((cell, index) => {
+              if (columns[index]) {
+                rowData[columns[index]] = cell;
+              }
+            });
+            return rowData;
+          });
+
+          // Actualizar selectores
+          updateSelectors();
+          hideError();
+        } catch (error) {
+          showError('Error al procesar el archivo Excel: ' + error.message);
+          console.error('Error processing Excel file:', error);
+        }
+      };
+
+      reader.onerror = () => showError('Error al leer el archivo');
+      reader.readAsArrayBuffer(file);
+    });
+
+    // Función para actualizar los selectores
+    function updateSelectors() {
+      [xSelect, ySelect, nameSelect].forEach(select => {
+        select.innerHTML = '<option value="">Seleccionar columna</option>';
+        columns.forEach(col => {
+          const option = document.createElement('option');
+          option.value = col;
+          option.textContent = col;
+          select.appendChild(option);
+        });
+        select.disabled = false;
+      });
+      exportButton.disabled = false;
+    }
+
+    // Función para mostrar error
+    function showError(message) {
+      errorDiv.textContent = message;
+      errorDiv.style.display = 'block';
+    }
+
+    // Función para ocultar error
+    function hideError() {
+      errorDiv.style.display = 'none';
+    }
+
+    // Función para convertir coordenadas
+    function convertCoordinates(x, y, sourceDatum, targetDatum) {
+      try {
+        return ol.proj.transform([x, y], sourceDatum, targetDatum);
+      } catch (error) {
+        console.error('Error al convertir coordenadas:', error);
+        return null;
+      }
+    }
+
+    // Manejador de cambios en selectores
+    [xSelect, ySelect, nameSelect, datumSelect].forEach(select => {
+      select.addEventListener('change', updateMap);
+    });
+
+    // Función para actualizar el mapa
+    function updateMap() {
+      if (!excelData || !xSelect.value || !ySelect.value) return;
+
+      vectorSource.clear();
+      const features = [];
+
+      excelData.forEach((row, index) => {
+        const x = parseFloat(row[xSelect.value]);
+        const y = parseFloat(row[ySelect.value]);
+        const name = row[nameSelect.value] || 'Sin nombre';
+
+        if (isNaN(x) || isNaN(y)) {
+          showError(`Error en la fila ${index + 2}: Coordenadas inválidas.`);
+          return;
+        }
+
+        const coords = convertCoordinates(x, y, datumSelect.value, 'EPSG:3857');
+
+        if (coords) {
+          const feature = new ol.Feature({
+            geometry: new ol.geom.Point(coords),
+            name: name
+          });
+          features.push(feature);
+        }
+      });
+
+      vectorSource.addFeatures(features);
+
+      // Ajustar la vista a los puntos
+      if (features.length > 0) {
+        map.getView().fit(vectorSource.getExtent(), {
+          padding: [50, 50, 50, 50],
+          duration: 1000
+        });
+      }
+    }
+
+    // Manejador de exportación
+    exportButton.addEventListener('click', function() {
+      if (!excelData || !xSelect.value || !ySelect.value || !nameSelect.value) {
+        showError('Por favor seleccione todas las columnas necesarias');
+        return;
+      }
+
+      try {
+        const kmlData = excelData.map((row, index) => {
+          const x = parseFloat(row[xSelect.value]);
+          const y = parseFloat(row[ySelect.value]);
+          const name = row[nameSelect.value] || 'Sin nombre';
+
+          if (isNaN(x) || isNaN(y)) {
+            showError(`Error en la fila ${index + 2}: Coordenadas inválidas.`);
+            return null;
+          }
+
+          const coords = convertCoordinates(x, y, datumSelect.value, 'EPSG:4326');
+
+          if (coords) {
+            return {
+              name: name,
+              coordinates: `${coords[0]},${coords[1]}`
+            };
+          } else {
+            return null;
+          }
+        }).filter(Boolean); // Filtrar los elementos nulos
+
+        const kml = `<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+<Document>
+${kmlData.map(point => `
+<Placemark>
+<name>${point.name}</name>
+<Point>
+<coordinates>${point.coordinates}</coordinates>
+</Point>
+</Placemark>
+`).join('')}
+</Document>
+</kml>`;
+
+        const blob = new Blob([kml], {type: 'application/vnd.google-earth.kml+xml'});
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'data.kml';
+        a.click();
+        hideError();
+      } catch (error) {
+        showError('Error al generar el archivo KML: ' + error.message);
+      }
+    });
+  </script>
+</body>
+</html>
